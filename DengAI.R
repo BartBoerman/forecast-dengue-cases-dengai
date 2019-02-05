@@ -6,6 +6,7 @@ if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-
 if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org") # month()
 if(!require(zoo)) install.packages("zoo", repos = "http://cran.us.r-project.org") # na.locf()
 if(!require(RcppRoll)) install.packages("RcppRoll", repos = "http://cran.us.r-project.org") # roll_mean
+if(!require(weathermetrics)) install.packages("weathermetrics", repos = "http://cran.us.r-project.org")
 # Functions to streamline the model training process for complex regression and classification problems. 
 if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
 # Calculate evaluation metrics
@@ -25,6 +26,7 @@ rm(train.labels.df)
 test.df <- read.csv("dengue_features_test.csv",
                     stringsAsFactors = FALSE,
                     na.strings = "NA")
+train.df <- train.df %>% filter(city == "sj")
 ####################################################################################
 # Missing values                                                                   #   
 ####################################################################################
@@ -37,13 +39,21 @@ missing_by_year.org <- train.df %>%
                     group_by(city, year) %>% 
                     summarise_all(funs(sum(is.na(.))))  %>%
                     arrange(city, year)
-impute.mean <- function(x) {
+f_impute.mean <- function(x) {
   replace(x, is.na(x), mean(x, na.rm = TRUE))
 }
 ####################################################################################
 # Data wrangling                                                                   #   
 ####################################################################################
-features.org = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station', ignore.case = TRUE)))
+features.org <- names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station', ignore.case = TRUE)))
+features.kelvin <- names(train.df %>% select(matches('temp_k', ignore.case = TRUE)))
+f_convert_temperature <- function(x){return (convert_temperature(x,old_metric = "c", new_metric = "k"))}
+f_heat_index <- function(t,rh){
+                      return(heat.index(t = t, # reanalysis_air_temp_k
+                                rh = rh, # reanalysis_relative_humidity_percent
+                                temperature.metric = 'celsius',
+                                output.metric = 'celsius'))
+}
 f_data_wrangling <- function(df) {
                         df <- df %>%
                                 mutate(week_start_date = as.Date(week_start_date)
@@ -51,39 +61,44 @@ f_data_wrangling <- function(df) {
                                        ,city = as.factor(city)
                                 ) %>%
                                 group_by(year, month) %>% 
-                                mutate_at(vars(features.org),.funs = impute.mean) %>%
+                                mutate_at(vars(features.org),.funs = f_impute.mean) %>%
                                 ungroup %>%
                                 mutate_at(vars(features.org),.funs = na.locf) %>% # opvullen van overgebleven ontbrekende waarden
-                                #na.locf() %>% 
+                                mutate_at(vars(features.kelvin),.funs = f_convert_temperature) %>%
+                                mutate(heat_index = f_heat_index(reanalysis_air_temp_k, reanalysis_relative_humidity_percent)) %>%
                                 arrange(city,week_start_date)
-  return(df)
+                        return(df)
 }
-train.df <- f_data_wrangling(train.df)
-
+train.df <- f_data_wrangling(train.df) %>% 
+                        filter(year > 1994) %>% # lot's of missing values in ndvi
+                        select(-c(ndvi_ne))     # lot's of missing values
+features.org = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station|heat_index', ignore.case = TRUE)))
 colSums(is.na(train.df)) 
 ####################################################################################
 # Correlation                                                                      #   
 ####################################################################################
-corMatrix = round(cor(train.df %>% select(features.org,total_cases) ) ,2)
+corMatrix = round(cor(train.df %>% select(features.org,total_cases), method = "spearman") ,2)
 
 highlyCorrelated = findCorrelation(corMatrix, cutoff=0.9,names=TRUE)
 
 # Some features are 100% correlated: 
 # reanalysis_dew_point_temp_k with reanalysis_specific_humidity_g_per_kg
+# reanalysis_air_temp_k with reanalysis_avg_temp_k
 # reanalysis_sat_precip_amt_mm with precipitation_amt_mm
-# So we can one of them.
-# Reanalysis_max_air_temp_k is highly correlated (0.92) with reanalysis_tdtr_k. The latter has the highest correlation with total cases.
-
+# So we can drop one of them.
+train.df <- train.df %>% select(-c(reanalysis_dew_point_temp_k, reanalysis_air_temp_k, reanalysis_sat_precip_amt_mm))
+features.selected = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station|heat_index', ignore.case = TRUE)))
+# we keep heat index for now
 # find the moving average / min / max with the highest correlation
 
-for (x in features.org) {
+for (x in features.selected) {
   cPrev <- 0
   cNew  <- 0
   nHigh <- 1
-  for (n in seq(1,16)){
+  for (n in seq(1,26)){
     df <- train.df %>% select(year,total_cases, x) %>% filter(!is.na(total_cases)) # train data
     df <- df %>% mutate(var = roll_mean(x = lag(df[[x]],1), n = n, fill = NA, align = "right")) %>% na.omit()
-    cNew = round(cor(df$total_cases, df$var),2)
+    cNew = round(cor(df$total_cases, df$var,method = "spearman"),2)
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
@@ -92,14 +107,14 @@ for (x in features.org) {
   rm(df)
 }
 
-for (x in features.org) {
+for (x in features.selected) {
   cPrev = 0
   cNew  <- 0
   nHigh <- 1
-  for (n in seq(1,16)){
+  for (n in seq(1,26)){
     df <- train.df %>% select(year,total_cases, x) %>% filter(!is.na(total_cases)) # train data
     df <- df %>% mutate(var = roll_min(x = lag(df[[x]],1), n = n, fill = NA, align = "right")) %>% na.omit()
-    cNew = round(cor(df$total_cases, df$var),2)
+    cNew = round(cor(df$total_cases, df$var, method = "spearman"),2)
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
@@ -108,14 +123,14 @@ for (x in features.org) {
   rm(df)
 }
 
-for (x in features.org) {
+for (x in features.selected) {
   cPrev = 0
   cNew  <- 0
   nHigh <- 1
-  for (n in seq(1,16)){
+  for (n in seq(1,26)){
     df <- train.df %>% select(year,total_cases, x) %>% filter(!is.na(total_cases)) # train data
     df <- df %>% mutate(var = roll_max(x = lag(df[[x]],1), n = n, fill = NA, align = "right")) %>% na.omit()
-    cNew = round(cor(df$total_cases, df$var),2)
+    cNew = round(cor(df$total_cases, df$var, method = "spearman"),2)
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
@@ -125,11 +140,11 @@ for (x in features.org) {
 }
 
 
-features.use = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station', ignore.case = TRUE))) # toegevoegde features
+features.selected = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station|heat_index|month', ignore.case = TRUE))) # toegevoegde features
 
-corMatrix = round(cor(train.df %>% na.omit %>% select(features.use,total_cases) ) ,2)
+corMatrix = round(cor(train.df %>% na.omit %>% select(features.selected,total_cases), method = "spearman") ,2) # more robust for skewed data or outliers
 
-highlyCorrelated = findCorrelation(corMatrix, cutoff=0.9,names=TRUE)
+highlyCorrelated = findCorrelation(corMatrix, cutoff=0.98,names=TRUE)
 
 
 
