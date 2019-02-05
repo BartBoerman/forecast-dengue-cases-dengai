@@ -87,8 +87,8 @@ for (x in features.org) {
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
-  xNew = paste(x,"mean",n, sep = "_")
-  train.df[[xNew]] <- roll_mean(x = lag(train.df[[x]],1), n = n, fill = NA, align = "right")
+  xNew = paste(x,"mean",nHigh, sep = "_")
+  train.df[[xNew]] <- roll_mean(x = lag(train.df[[x]],1), n = nHigh, fill = NA, align = "right")
   rm(df)
 }
 
@@ -103,8 +103,8 @@ for (x in features.org) {
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
-  xNew = paste(x,"min", n, sep = "_")
-  train.df[[xNew]] <- roll_min(x = lag(train.df[[x]],1), n = n, fill = NA, align = "right")
+  xNew = paste(x,"min", nHigh, sep = "_")
+  train.df[[xNew]] <- roll_min(x = lag(train.df[[x]],1), n = nHigh, fill = NA, align = "right")
   rm(df)
 }
 
@@ -119,8 +119,8 @@ for (x in features.org) {
     if(cPrev < cNew) nHigh <- n 
     cPrev = cNew
   }
-  xNew = paste(x,"max", n, sep = "_")
-  train.df[[xNew]] <- roll_max(x = lag(train.df[[x]],1), n = n, fill = NA, align = "right")
+  xNew = paste(x,"max", nHigh, sep = "_")
+  train.df[[xNew]] <- roll_max(x = lag(train.df[[x]],1), n = nHigh, fill = NA, align = "right")
   rm(df)
 }
 
