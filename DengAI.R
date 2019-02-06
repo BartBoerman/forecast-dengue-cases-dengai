@@ -2,10 +2,11 @@
 # Required packages                                                                #   
 ####################################################################################
 # Data wrangling
-if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
-if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org") # month()
-if(!require(zoo)) install.packages("zoo", repos = "http://cran.us.r-project.org") # na.locf()
-if(!require(RcppRoll)) install.packages("RcppRoll", repos = "http://cran.us.r-project.org") # roll_mean
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org") # data wrangling framework
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org") # date functions
+if(!require(zoo)) install.packages("zoo", repos = "http://cran.us.r-project.org") # time series, na.locf() 
+if(!require(RcppRoll)) install.packages("RcppRoll", repos = "http://cran.us.r-project.org") # fast rolling mean/max/min
+# Weather metrics
 if(!require(weathermetrics)) install.packages("weathermetrics", repos = "http://cran.us.r-project.org")
 # Functions to streamline the model training process for complex regression and classification problems. 
 if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
@@ -47,7 +48,7 @@ f_impute.mean <- function(x) {
 ####################################################################################
 features.org <- names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station', ignore.case = TRUE)))
 features.kelvin <- names(train.df %>% select(matches('temp_k', ignore.case = TRUE)))
-f_convert_temperature <- function(x){return (convert_temperature(x,old_metric = "c", new_metric = "k"))}
+f_convert_temperature_to_c <- function(x){return (convert_temperature(x,old_metric = "k", new_metric = "c"))}
 f_heat_index <- function(t,rh){
                       return(heat.index(t = t, # reanalysis_air_temp_k
                                 rh = rh, # reanalysis_relative_humidity_percent
@@ -64,7 +65,7 @@ f_data_wrangling <- function(df) {
                                 mutate_at(vars(features.org),.funs = f_impute.mean) %>%
                                 ungroup %>%
                                 mutate_at(vars(features.org),.funs = na.locf) %>% # opvullen van overgebleven ontbrekende waarden
-                                mutate_at(vars(features.kelvin),.funs = f_convert_temperature) %>%
+                                mutate_at(vars(features.kelvin),.funs = f_convert_temperature_to_c) %>%
                                 mutate(heat_index = f_heat_index(reanalysis_air_temp_k, reanalysis_relative_humidity_percent)) %>%
                                 arrange(city,week_start_date)
                         return(df)
