@@ -141,15 +141,70 @@ for (x in features.selected) {
 }
 
 
-features.selected = names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station|heat_index|month', ignore.case = TRUE))) # toegevoegde features
+features.selected <- names(train.df %>% select(matches('ndvi|precipitation|reanalysis|station|heat_index|month', ignore.case = TRUE))) # toegevoegde features
 
-corMatrix = round(cor(train.df %>% na.omit %>% select(features.selected,total_cases), method = "spearman") ,2) # more robust for skewed data or outliers
-
-highlyCorrelated = findCorrelation(corMatrix, cutoff=0.98,names=TRUE)
+corMatrix <- round(cor(train.df %>% na.omit %>% select(features.selected,total_cases), method = "spearman") ,2) # more robust for skewed data or outliers
 
 
+####################################################################################
+# Feature selection                                                                #   
+####################################################################################
+# Let's start with a simple model
+features.selected <- c("month", "station_max_temp_c_mean_22", "ndvi_sw_max_26") 
+
+####################################################################################
+# XGBoost                                                                          #   
+####################################################################################
+
+train.x <- as.matrix(train.df %>% filter(year < 2005) %>% na.omit() %>% select(features.selected))
+train.y <- train.df %>% filter(year < 2005) %>% na.omit() %>% select(y = total_cases)
+test.x  <- as.matrix(train.df %>% filter(year >= 2005) %>% na.omit() %>% select(features.selected))
+test.y   <- train.df %>% filter(year >= 2005) %>% na.omit() %>% select(y = total_cases) 
+
+require(xgboost)
+
+xgb_trcontrol = trainControl(
+                      method = "cv",
+                      number = 5,
+                      early.stop.round = 3, 
+                      allowParallel = TRUE,
+                      verboseIter = FALSE,
+                      returnData = FALSE
+)
+
+xgbGrid <- expand.grid(nrounds = 100,  # 100 is default
+                       max_depth = c(4, 5, 6), # 6 is de standaard
+                       eta = 0.3, # standaard voor xgboost
+                       gamma = 0, # standaard voor xgboost
+                       colsample_bytree = 1.0, 
+                       min_child_weight = 10,
+                       subsample = 1.0 # random sampling voorkomt overfitting
+)
 
 
+# Custom MAE metric in caret format
+mae_metric <- function (data,
+                        lev = NULL,
+                        model = NULL) {
+  out <- mae(exp(data$obs), exp(data$pred))
+  names(out) <- "MAE"
+  out
+}
+set.seed(1413)
+xgb_model = train(
+          xgb.DMatrix(train.x),
+          train.y$y,  
+          trControl = xgb_trcontrol,
+          tuneGrid = xgbGrid,
+          metric = "MAE",
+          maximize = FALSE,
+          method = "xgbTree"
+)
 
+xgb_model$bestTune
 
-
+predicted = predict(xgb_model, xgb.DMatrix(test.x))
+residuals = test.y$y - predicted
+RMSE = sqrt(mean(residuals^2))
+MAE =  mean(abs(residuals))
+print(MAE)
