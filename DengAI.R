@@ -145,7 +145,17 @@ features.selected <- names(train.df %>% select(matches('ndvi|precipitation|reana
 
 corMatrix <- round(cor(train.df %>% na.omit %>% select(features.selected,total_cases), method = "spearman") ,2) # more robust for skewed data or outliers
 
-
+####################################################################################
+# Outliers in observed values                                                      #   
+####################################################################################
+my_data = train.df %>% filter(city == "sj") %>% na.omit %>% select(x = month, y= total_cases, month, year, city)
+p <- ggplot(my_data, aes(x, y)) + 
+              geom_point(aes(colour = factor(city))) + 
+              scale_x_discrete(name ="Months", limits=seq(1,12))
+print(p)
+train.df <- train.df %>% filter(  !(month = 8 & total_cases > 300) & 
+                                  !(month = 7 & total_cases  > 200) &
+                                  !(month = 6 & total_cases  > 100))
 ####################################################################################
 # Feature selection                                                                #   
 ####################################################################################
@@ -155,7 +165,6 @@ features.selected <- c("month", "station_max_temp_c_mean_22", "ndvi_sw_max_26")
 ####################################################################################
 # XGBoost                                                                          #   
 ####################################################################################
-
 train.x <- as.matrix(train.df %>% filter(year < 2005) %>% na.omit() %>% select(features.selected))
 train.y <- train.df %>% filter(year < 2005) %>% na.omit() %>% select(y = total_cases)
 test.x  <- as.matrix(train.df %>% filter(year >= 2005) %>% na.omit() %>% select(features.selected))
@@ -165,15 +174,14 @@ require(xgboost)
 
 xgb_trcontrol = trainControl(
                       method = "cv",
-                      number = 5,
-                      early.stop.round = 3, 
+                      number = 5, 
                       allowParallel = TRUE,
                       verboseIter = FALSE,
                       returnData = FALSE
 )
 
 xgbGrid <- expand.grid(nrounds = 100,  # 100 is default
-                       max_depth = c(4, 5, 6), # 6 is de standaard
+                       max_depth = c(3, 4, 5), # 6 is de standaard
                        eta = 0.3, # standaard voor xgboost
                        gamma = 0, # standaard voor xgboost
                        colsample_bytree = 1.0, 
@@ -207,4 +215,4 @@ predicted = predict(xgb_model, xgb.DMatrix(test.x))
 residuals = test.y$y - predicted
 RMSE = sqrt(mean(residuals^2))
 MAE =  mean(abs(residuals))
-print(MAE)
+print(MAE) # 16.64
