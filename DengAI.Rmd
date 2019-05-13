@@ -1,0 +1,795 @@
+---
+title: "The quest for correlation between dengue and historical weather measurements"
+author: "Bart Boerman"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    citation_package: natbib
+    fig_caption: yes
+    keep_tex: no
+    template: svm-latex-ms.tex
+  word_document: default
+fontsize: 11pt
+keywords: time series, impute, anomaly, (rolling) correlation, moving average, seasonality,
+  forecast, prophet, data visualization, R
+endnote: no
+spacing: double
+abstract: "This document describes my effort to be competitive in predicting in the dengue forecasting competition, DengAI, hosted by DrivenData.  I used the competition as a capstone project in the Professional Certificate in Data Science course hosted on EDX by HarvardX. Dengue fever is a mosquito-borne disease that occurs in tropical and sub-tropical parts of the world. Symptoms are similar to the flu in mild cases, in severe cases however, dengue fever can cause death. I followed a CRISP-DM like process: background study, analyze and prepare data, configure machine learning model, validate and submit results to leaderboard. Predictive power of time series can be increased by adding moving averages. The final model is able to predict the seasonal pattern of dengue. The conclusion proposes using ensemble modelling to add the capability to predict outbreaks."
+---
+
+```{r setup, include=FALSE}
+########################################################################################################################################
+# Document options                                                                                                                     #
+########################################################################################################################################
+options(tinytex.verbose = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+doc_pagebreak <- function() {
+  if(knitr::is_latex_output())
+    return("\\newpage")
+  else
+    return('<div style="page-break-before: always;" />')
+}
+########################################################################################################################################
+# R packages and default theme for data visualization                                                                                  #
+########################################################################################################################################
+# Data wrangling
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org") # data wrangling and visualization framework
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org") # date functions
+if(!require(imputeTS)) install.packages("imputeTS", repos = "http://cran.us.r-project.org") # impute time series
+if(!require(TTR)) install.packages("TTR", repos = "http://cran.us.r-project.org") # moving averages
+# Weather metrics
+if(!require(weathermetrics)) install.packages("weathermetrics", repos = "http://cran.us.r-project.org")
+# Anomalies
+if(!require(tibbletime)) install.packages("tibbletime", repos = "http://cran.us.r-project.org") # anomalize dependency
+if(!require(anomalize)) install.packages("anomalize", repos = "http://cran.us.r-project.org")
+# Machine learning
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(prophet)) install.packages("prophet", repos = "http://cran.us.r-project.org") 
+if(!require(Metrics)) install.packages("Metrics", repos = "http://cran.us.r-project.org")
+# Visualisation
+if(!require(GGally)) install.packages("GGally", repos = "http://cran.us.r-project.org") # 
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+if(!require(ggthemes)) install.packages("ggthemes", repos = "http://cran.us.r-project.org") 
+theme_set(theme_light(base_size = 9)) # base_family = "Lato",
+theme_update(plot.title = element_text(hjust = 0, size=10 , face = "bold", color = "#7a7a7a" )
+            ,plot.subtitle = element_text(hjust = 0, color = "#7a7a7a")   
+            ,plot.caption = element_text(hjust = 0, color = "#7a7a7a")
+            ,panel.border = element_blank()
+            ,axis.line = element_line(colour = "black")
+            ,axis.title = element_text(hjust = 0.5, color = "#7a7a7a")
+            ,axis.text.y = element_text(color = "#7a7a7a")
+            ,axis.text.x = element_text(color = "#7a7a7a")
+            ,legend.text = element_text(color = "#7a7a7a", size = 9)
+            ,legend.title = element_text(color = "#7a7a7a", size = 9)
+            )
+
+```
+
+```{r functions, echo=FALSE}
+########################################################################################################################################
+# Custom functions                                                                                                                   #
+########################################################################################################################################
+f_convert_temperature_to_c <- function(x){return (convert_temperature(x,old_metric = "k", new_metric = "c"))}
+f_data_wrangling <- function(df) {
+                        df <- df %>%
+                                arrange(city,week_start_date) %>%
+                                mutate(week_start_date = as.Date(week_start_date)
+                                       ,month = month(week_start_date)
+                                       ,city = as.factor(city)
+                                ) %>%
+                                mutate_at(vars(features.selected),.funs = na.kalman) %>%
+                                mutate_at(vars(features.kelvin),.funs = f_convert_temperature_to_c) 
+                        return(df)
+}
+f_normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+f_roll_cor <- rollify(~cor(.x, .y,method = "spearman", use = "pairwise.complete.obs"), window = 53)
+```
+
+```{r data wrangling, echo=FALSE}
+########################################################################################################################################
+# Start data wrangling                                                                                                                 #
+########################################################################################################################################
+# Load train data
+train.df <- read.csv("dengue_features_train.csv",
+                     stringsAsFactors = FALSE,
+                     na.strings = "NA")
+train.labels.df <- read.csv("dengue_labels_train.csv",
+                            stringsAsFactors = FALSE,
+                            na.strings = "NA")
+# Load unseen, test, data
+test.df <- read.csv("dengue_features_test.csv",
+                    stringsAsFactors = FALSE,
+                    na.strings = "NA")
+# combine in one data set for data wrangling and data analysis 
+full.df <- rbind(train.df,test.df) 
+full.df <- full.df %>% left_join(train.labels.df, 
+                                    by = c("year" = "year", "city" = "city", "weekofyear" = "weekofyear")) 
+rm(train.labels.df)
+# let's get all features on the same temperature scale, kelvin will be converted to celsius
+features.kelvin <- names(full.df %>% select(matches('temp_k|tdtr_k', ignore.case = TRUE)))
+# create a list of independent variables, features, available in the data set
+features.selected = names(full.df %>% select(matches('ndvi|precipitation|reanalysis|station',ignore.case = TRUE)))
+# base variables in each data set
+names.base <- c("city", "week_start_date", "year", "month", "weekofyear","total_cases")
+####################################################################################
+# San Juan: Data wrangling                                                         #
+####################################################################################
+# select city
+full.df.sj <- full.df %>% filter(city == 'sj') 
+# Data wrangling
+full.df.sj <- f_data_wrangling(full.df.sj) 
+# select features and add class tbl_time (the latter is required by anomalize)
+full.df.sj <- full.df.sj %>% select(names.base,
+                                      humidity = reanalysis_relative_humidity_percent,
+                                      temp = station_max_temp_c,
+                                      temp_air = reanalysis_min_air_temp_k,
+                                      precip = station_precip_mm,
+                                      dewp = reanalysis_dew_point_temp_k,
+                                      ndvi = ndvi_nw) %>%
+                                      as_tbl_time(week_start_date)
+full.df.sj.org <- full.df.sj
+by_month.sj <- full.df.sj %>% select(year, month, total_cases) %>%
+                                      group_by(month) %>% 
+                                      summarise(min_total_cases = min(total_cases, na.rm = TRUE),
+                                                max_total_cases = max(total_cases, na.rm = TRUE))  
+####################################################################################
+# San Juan: Lagging features and feature interaction                               #
+####################################################################################
+f_rolling_sum <- rollify(sum, window = 52)
+full.df.sj <- full.df.sj %>% mutate(temp_sma = SMA(full.df.sj$temp, n = 25),
+                                    temp_air_sma = SMA(full.df.sj$temp_air, n = 16),
+                                    humidity_sma = SMA(full.df.sj$humidity, n = 18),
+                                    dewp_sma = SMA(full.df.sj$dewp, n = 18),  
+                                    ndvi_sma = SMA(full.df.sj$ndvi, n = 12), 
+                                    precip_sum = f_rolling_sum(precip),  
+                                    interaction = temp_sma * humidity_sma) 
+####################################################################################
+# Data wrangling: Iquitos                                                          #
+####################################################################################
+# select city
+full.df.iq <- full.df %>% filter(city == 'iq') 
+# Data wrangling
+full.df.iq <- f_data_wrangling(full.df.iq) 
+# select features and add class tbl_time (the latter is required by anomalize)
+full.df.iq <- full.df.iq %>% select(names.base,
+                                      humidity = reanalysis_relative_humidity_percent,
+                                      temp = station_max_temp_c,
+                                      temp_air = reanalysis_min_air_temp_k,
+                                      precip = station_precip_mm,
+                                      dewp = reanalysis_dew_point_temp_k) %>%
+                                      as_tbl_time(week_start_date)
+by_month.iq <- full.df.iq %>% select(year, month, total_cases) %>%
+                                      group_by(month) %>% 
+                                      summarise(min_total_cases = min(total_cases, na.rm = TRUE),
+                                                max_total_cases = max(total_cases, na.rm = TRUE))  
+####################################################################################
+# Iquitos: Lagging features and feature interaction                                #
+####################################################################################
+f_rolling_sum <- rollify(sum, window = 6)
+full.df.iq <- full.df.iq %>% mutate(temp_sma = SMA(temp, n = 12),
+                                    temp_air_sma = SMA(full.df.iq$temp_air, n = 8), 
+                                    humidity_sma = SMA(humidity, n = 3), 
+                                    precip_sum = f_rolling_sum(precip),
+                                    dewp_sma = SMA(dewp, n = 6),
+                                    interaction = temp_sma * humidity_sma) 
+```
+
+```{r predict outbreaks per year, echo=FALSE}
+# determine years with an outbreak of dengue, outbreaks start in second semester
+outbreak_year      <- full.df.sj %>%
+                          mutate(semester = semester(week_start_date)) %>%
+                          group_by(year,semester) %>%
+                          summarise(total_cases = max(total_cases)) %>%
+                          mutate(outbreak = if_else(total_cases > 125,"Yes","No")) %>%
+                          mutate(outbreak = as.factor(outbreak)) %>%
+                          filter(semester == 2) %>%
+                          select("year","outbreak")
+# determine import data points just before outbreak period 
+outbreak_data      <- full.df.sj %>%
+                          mutate(quarter = quarter(week_start_date)) %>%
+                          filter(quarter == 3, year > 1990) %>%
+                          group_by(year) %>%
+                          summarise(temp = mean(temp),
+                                    precip= sum(precip)) 
+# combine 
+outbreak <- inner_join(outbreak_data,outbreak_year,by = c("year"="year"))
+# create train and test set
+train_outbreak  <- outbreak  %>% filter(year > 1990 & year < 2006)
+# used added 2006 and 2007 to test if tree predicts outbreak in 2007 and not in 2006.
+test_outbreak   <- outbreak %>% filter(year >= 2006) %>% select(-matches("cases")) 
+  
+# train a simple random forest model
+tree.fit <- randomForest(
+  outbreak ~. 
+  ,data = train_outbreak
+)    
+# add predictions to data
+outbreak$outbreak[outbreak$year >= 2006] <- predict(tree.fit, test_outbreak) 
+full.df.sj <- full.df.sj %>% left_join(outbreak, by = c("year","year"))
+# outbreak peak periods are august, september and oktober 
+full.df.sj$outbreak[full.df.sj$month < 7 & full.df.sj$outbreak == "Yes"] <- "No"
+full.df.sj$outbreak[full.df.sj$month > 10 & full.df.sj$outbreak == "Yes"] <- "No"
+full.df.sj$outbreak[is.na(full.df.sj$outbreak)] <- "No"
+# did not have the time create a model for Iquitos
+full.df.iq$outbreak <- "Unkonwn"
+```
+
+```{r forecast model, echo=FALSE, warning=FALSE, message=FALSE}
+f_prophet_model <- function(df, cutOffDate, horizon = 5){ # IQ 2005-06-20 SJ 2003-04-20
+                            city <- unique(df$city)
+                            cutOffDate <-as.Date(cutOffDate)
+                            cap <- ceiling(IQR(df$total_cases, na.rm = T) * 1.5) 
+                            floor <- if_else(unique(df$city) == "sj",20,4)  
+                            df$y <- df$total_cases
+                            df$ds <- df$week_start_date
+                            df$y[df$y > cap] <- NA 
+                            df$cap <- cap
+                            df$floor <- floor 
+                            train.df <- df %>% filter(week_start_date <= cutOffDate) %>% na.omit 
+                            m <- prophet(weekly.seasonality = FALSE, 
+                                         daily.seasonality = FALSE, 
+                                         yearly.seasonality = if_else(city == "sj",5,5),
+                                         changepoint.prior.scale = if_else(city == "sj",0.001,0.001),
+                                         mode = if_else(city == "sj","additive","additive"),
+                                         growth = "logistic") 
+                            m <- add_regressor(m, if_else(city == "sj","temp_sma","temp_air_sma"))
+                            m <- add_regressor(m, if_else(city == "sj","humidity_sma","humidity_sma"))
+                            m <- add_regressor(m, if_else(city == "sj","precip_sum","precip_sum"))
+                            m <- add_regressor(m, if_else(city == "sj","outbreak","precip_sum"))
+                            m <- fit.prophet(m,train.df)
+                            test.df <- df %>% filter(week_start_date > cutOffDate & 
+                                              week_start_date <= (cutOffDate + years(horizon))) %>% 
+                                              mutate(ds = week_start_date, y = 0)
+                           
+                            forecast <- predict(m, test.df) %>%
+                                        mutate(week_start_date = as.Date(ds)) %>%
+                                        select(week_start_date, yhat, yhat_upper) %>%
+                                        inner_join(df,  by = "week_start_date")
+                            m$forecast <- forecast 
+                            return(m)  
+}
+```
+
+```{r plot forecast, echo=FALSE, warning=FALSE, message=FALSE}
+f_figure_forecast <- function(forecast){ 
+                              mae <- round(mae(forecast$total_cases[!is.na(forecast$total_cases)],
+                                               forecast$yhat[!is.na(forecast$total_cases)]),2)
+                              city <- if_else(unique(forecast$city) == "sj","San Juan","Iquitos")
+                              Title <- paste(city, ", mean absolute error on train data: ",mae,sep = "")
+                              LegendTitle = ""
+                              LineType = c("solid","dashed")
+                              LineColor = c("darkblue", "darkblue")
+                              figure_forecast <- ggplot(data = forecast) +
+                                            geom_line(aes(x = ds, y = yhat,
+                                                          linetype = "Forecast",
+                                                          color = "Forecast")) +
+                                            scale_color_manual(name = LegendTitle, values = LineColor) +
+                                            scale_linetype_manual(name = LegendTitle, values = LineType) +
+                                            scale_x_date(date_breaks = "1 year", 
+                                                         labels = scales::date_format(format = "%Y"), minor_breaks = NULL) +
+                                            labs(title = Title, x =  "", y = "...") +
+                                            theme(legend.direction = 'horizontal', legend.position = 'bottom')
+return(figure_forecast)
+}
+f_figure_validate <- function(figure_forecast){ 
+                              figure_validate <- figure_forecast +
+                                            geom_line(aes(x = ds, y = total_cases,
+                                                           linetype = "Observed",
+                                                           color = "Observed"), na.rm = TRUE)
+return(figure_validate)
+}
+```
+
+```{r plot anomolies, echo=FALSE}
+########################################################################################################################################
+# Start exploratory data analysis and visualization                                                                                    #
+########################################################################################################################################
+####################################################################################
+# Plot anomolies per city                                                          #
+####################################################################################
+anomalized.sj <- full.df.sj %>% filter(year > 2001 & year <= 2008) %>% na.omit %>%
+                       time_decompose(total_cases, 
+                       method = "stl",
+                       frequency = "12 months",
+                       trend = "12 months",
+                       message = FALSE) %>%
+                       anomalize(remainder, alpha = 0.2, max_anoms = 0.05,  method = "gesd", verbose = TRUE) 
+
+anomalized.iq <- full.df.iq %>% filter(year > 2001 & year <= 2008) %>% na.omit %>%
+                       time_decompose(total_cases, 
+                       method = "stl",
+                       frequency = "12 months",
+                       trend = "12 months",
+                       message = FALSE) %>%
+                       anomalize(remainder, alpha = 0.2, max_anoms = 0.05,  method = "gesd", verbose = TRUE) 
+
+p1 <-           anomalized.sj$anomalized_tbl %>% 
+                      time_recompose() %>% 
+                      plot_anomalies(time_recompose = TRUE) +
+                      scale_x_date(date_breaks = "52 weeks", labels = scales::date_format(format = "%Y"), minor_breaks = NULL) +
+                      scale_y_continuous(breaks = seq(0,150, by = 50), minor_breaks = NULL) +
+                      labs(title = "San Juan", x =  NULL, y = NULL) + 
+                      theme(legend.position = "none")
+p2 <-           anomalized.iq$anomalized_tbl %>% 
+                      time_recompose() %>% 
+                      plot_anomalies(time_recompose = TRUE) +
+                      scale_x_date(date_breaks = "52 weeks", labels = scales::date_format(format = "%Y"), minor_breaks = NULL) +
+                      scale_y_continuous(breaks = seq(0,150, by = 50), minor_breaks = NULL) +
+                      labs(title = "Iquitos", x =  NULL, y = NULL) + 
+                      theme(legend.position = "none")
+
+figure_anomalies <- ggarrange(p1, p2, ncol = 1, nrow = 2) %>%
+                      annotate_figure(top = text_grob("Anomalies", color = "#7a7a7a", face = "bold", size = 10),
+                                      bottom = text_grob("", color = "#7a7a7a", hjust = 0.5, face = "italic", size = 9),
+                                      fig.lab = NULL, fig.lab.face = "plain")
+```
+
+```{r plot seasonality, echo=FALSE}
+figure_season_sj <- ggplot(data = anomalized.sj$anomalized_tbl %>% filter (year(week_start_date) %in% c(2006)), aes(x = week_start_date, y = season)) + 
+                    geom_smooth(method = "loess", formula = "y ~ x", se = FALSE, size =2) +
+                    scale_x_date(date_breaks = "1 month", labels = scales::date_format(format = "%m"), minor_breaks = NULL) +
+                    labs(title = "San Juan", subtitle = "season", x =  NULL, y = NULL) +
+                    theme(axis.text.y=element_blank(), panel.grid = element_blank(), axis.line.y = element_blank())
+
+figure_season_iq <- ggplot(data = anomalized.iq$anomalized_tbl %>% filter (year(week_start_date) %in% c(2006)), aes(x = week_start_date, y = season)) + 
+                    geom_smooth(method = "loess", formula = "y ~ x", se = FALSE, size =2) + 
+                    scale_x_date(date_breaks = "1 month", labels = scales::date_format(format = "%m"), minor_breaks = NULL) +
+                    labs(title = "Iquitos", subtitle = "season", x =  NULL, y = NULL) +
+                    theme(axis.text.y=element_blank(), panel.grid = element_blank(), axis.line.y = element_blank(),
+                          panel.border = element_rect(colour = "#7a7a7a", fill=NA, size=2) )
+```
+
+```{r plot min max, echo=FALSE}
+pMin.sj <- ggplot(data = by_month.sj, aes(x=month, y= min_total_cases)) +
+                geom_col(position = "dodge") +
+                scale_y_continuous(breaks = seq(0,max(by_month.sj$min_total_cases), by = 1), 
+                                   minor_breaks = NULL, limits = c(0,max(by_month.sj$min_total_cases))) +
+                scale_x_continuous(breaks = seq(1,12, by = 1), minor_breaks = NULL) +
+                labs(title = "San Juan", 
+                     subtitle = "minimum", 
+                     caption = NULL, x =  NULL, y = NULL)
+pMax.sj <- ggplot(data = by_month.sj, aes(x=month, y= max_total_cases)) +
+                geom_col(position = "dodge") +
+                scale_y_continuous(breaks = seq(0,max(by_month.sj$max_total_cases), by = 100), 
+                                   minor_breaks = NULL, limits = c(0,max(by_month.sj$max_total_cases))) +
+                scale_x_continuous(breaks = seq(1,12, by = 1), minor_breaks = NULL) +
+                labs(title = "San Juan", 
+                     subtitle = "maximum", 
+                     caption = NULL, x =  NULL, y = NULL)
+pMin.iq <- ggplot(data = by_month.iq, aes(x=month, y= min_total_cases)) +
+                geom_col(position = "dodge") +
+                scale_y_continuous(breaks = seq(0,max(by_month.iq$min_total_cases), by = 1), 
+                                   minor_breaks = NULL, limits = c(0,max(by_month.iq$min_total_cases))) +
+                scale_x_continuous(breaks = seq(1,12, by = 1), minor_breaks = NULL) +
+                theme(axis.text.y=element_blank(), panel.grid = element_blank(), axis.line.y = element_blank(),
+                          panel.border = element_rect(colour = "#7a7a7a", fill=NA, size=2) ) +
+                labs(title = "Iquitos", 
+                     subtitle = "minimum", 
+                     caption = NULL, x =  NULL, y = NULL)
+pMax.iq <- ggplot(data = by_month.iq, aes(x=month, y= max_total_cases)) +
+                geom_col(position = "dodge") +
+                scale_y_continuous(breaks = seq(0,max(by_month.iq$max_total_cases), by = 25), 
+                                   minor_breaks = NULL, limits = c(0,max(by_month.iq$max_total_cases))) +
+                scale_x_continuous(breaks = seq(1,12, by = 1), minor_breaks = NULL) +
+                theme(axis.text.y=element_blank(), panel.grid = element_blank(), axis.line.y = element_blank(),
+                          panel.border = element_rect(colour = "#7a7a7a", fill=NA, size=2) ) +
+                labs(title = "Iquitos", 
+                     subtitle = "maximum", 
+                     caption = NULL, x =  NULL, y = NULL)
+```
+
+```{r pairwise comparison, echo=FALSE}
+f_ggpairs_scatter <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+              geom_point(size = 0.1, colour = "blue")
+  return(p)
+}
+f_ggpairs_density <- function(data, mapping, ...){
+  p <- ggplot(data = data, mapping = mapping) + 
+              geom_density(fill = "darkblue", colour = "darkblue")
+  return(p)
+}
+columns <- c("total_cases","temp","temp_air","humidity","precip","dewp","ndvi")
+columnLabels <- c("Cases","Temp","Air temp","Humidity","Precip","Dewp","Ndvi")
+figure_comp <- ggpairs(data = full.df.sj.org %>% select(columns) %>% na.omit, 
+                     upper = list(continuous = wrap("cor", method = "spearman", use = "pairwise.complete.obs",color = "grey50")),
+                     diag = list(continuous = f_ggpairs_density),
+                     lower = list(continuous = f_ggpairs_scatter),
+                     columnLabels = columnLabels ,
+                     axisLabels = "none") + 
+                     labs(title = "Dengue cases and selected features") +
+                     theme(legend.position = "none", 
+                     axis.ticks = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.border = element_rect(linetype = "dashed", colour = "grey", fill = NA),
+                     panel.spacing = grid::unit(0.5,"lines"),
+                     strip.text = element_text(size = 8, colour = "darkblue"))
+```
+
+```{r pairwise comparison sma, echo=FALSE}
+columns <- names(full.df.sj %>% select(matches("sma|sum|interaction|cases")))
+columnLabels <- c("Cases","Temp.","Air temp","Humid.","Dewp.","NDVI","Precip.","Interact.")
+figure_comp_sma <- ggpairs(data = full.df.sj %>% select(columns) %>% na.omit, 
+                         upper = list(continuous = wrap("cor", method = "spearman", use = "pairwise.complete.obs",color = "grey50")),
+                         diag = list(continuous = f_ggpairs_density),
+                         lower = list(continuous = f_ggpairs_scatter),
+                         columnLabels = columnLabels ,
+                         axisLabels = "none") + 
+                         labs(title = "Dengue cases and moving averages of selected features") +
+                         theme(legend.position = "none", 
+                         axis.ticks = element_blank(), 
+                         panel.grid.major = element_blank(),
+                         panel.border = element_rect(linetype = "dashed", colour = "grey", fill = NA),
+                         panel.spacing = grid::unit(0.5,"lines"),
+                         strip.text = element_text(size = 8, colour = "darkblue"))
+```
+
+```{r plot interaction trend, echo=FALSE, fig.height=2}
+LegendTitle = "Time series:"
+LineType = c('solid', 'dashed')
+LineColor = c('blue', 'darkblue')
+pData <- full.df.sj %>% filter(!is.na(total_cases)) %>% na.omit 
+figure_interaction <- ggplot(data = pData) + 
+                          geom_line(aes(x = week_start_date, y = f_normalize(total_cases), 
+                                        linetype = "Dengue cases", 
+                                        color = "Dengue cases")) + 
+                          geom_line(aes(x = week_start_date, y = f_normalize(interaction), 
+                                        linetype = "Temperature multiplied by humidity", 
+                                        color = "Temperature multiplied by humidity")) +
+                          scale_color_manual(name = LegendTitle, values = LineColor) +
+                          scale_linetype_manual(name = LegendTitle, values = LineType) +
+                          scale_x_date(date_breaks = "1 year", labels = scales::date_format(format = "%Y"), minor_breaks = NULL) +
+                          labs(title = "Tops and valleys coincide", x =  "", y = "") +
+                          theme(axis.title.x = element_blank(),legend.direction = 'horizontal', legend.position = 'bottom')
+```
+
+```{r plot scatter plot, echo=FALSE}
+pData <- full.df.sj %>% filter(!is.na(total_cases)) %>% mutate(quarter = quarter(week_start_date)) %>% na.omit 
+figure_interaction_scatter <- ggplot(data = pData) + 
+                                    geom_point(aes(x = total_cases, y = interaction, colour = quarter) ) +
+                                    scale_y_continuous(breaks = seq(0,3000, by = 100)) +
+                                    scale_x_continuous(breaks = seq(0,500, by = 100)) +
+                                    labs(title = "Large outbreaks above 2500", 
+                                         x =  "", 
+                                         y = "Temp sma * by humidity sma",
+                                         color = "Quarter") 
+figure_dewp_scatter <- ggplot(data = pData) + 
+                                    geom_point(aes(x = total_cases, y = dewp_sma, colour = quarter) ) +
+                                    scale_x_continuous(breaks = seq(0,500, by = 100)) +
+                                    labs(title = "Large outbreaks above 21.5", 
+                                         x =  "", 
+                                         y = "Dewp point sma",
+                                         color = "Quarter")
+figure_precipitation_scatter <- ggplot(data = pData) + 
+                                    geom_point(aes(x = total_cases, y = precip_sum, colour = quarter) ) +
+                                    scale_x_continuous(breaks = seq(0,500, by = 100)) +
+                                    labs(title = "A plain lagging value might be better a better fit", 
+                                         x =  "", 
+                                         y = "Precipitation rolling sum",
+                                         color = "Quarter")
+figure_temp_scatter <- ggplot(data = pData) + 
+                                    geom_point(aes(x = total_cases, y = temp_sma, colour = quarter) ) +
+                                    scale_x_continuous(breaks = seq(0,500, by = 100)) +
+                                    labs(title = "Large outbreaks above 30.5", 
+                                         x =  "", 
+                                         y = "Temp sma",
+                                         color = "Quarter")
+
+figure_scatter <- ggarrange(figure_interaction_scatter, 
+                            figure_dewp_scatter,
+                            figure_precipitation_scatter,
+                            figure_temp_scatter,
+                            ncol = 2,
+                            nrow = 2,
+                            common.legend = TRUE)
+
+```
+
+```{r plot rolling correlation, echo=FALSE}
+full.df.sj <- full.df.sj %>% mutate(temp_rcor = f_roll_cor(temp_sma, total_cases))
+LegendTitle <- "Time series:"
+LineType <- c('solid', 'dashed')
+LineColor <- c('blue', 'darkblue')
+NameS1 <-"Dengue cases"
+NameS2 <-"Rolling correlation"
+pData <- full.df.sj %>% select(week_start_date, s1 = total_cases, s2 = temp_rcor) %>% na.omit
+figure_cor_roll <- ggplot(data = pData) + 
+                          geom_line(aes(x = week_start_date, y = f_normalize(s1), linetype = NameS1, color = NameS1)) + 
+                          geom_line(aes(x = week_start_date, y = s2, linetype = NameS2, color = NameS2)) +
+                          scale_color_manual(name = LegendTitle, values = LineColor) +
+                          scale_linetype_manual(name = LegendTitle, values = LineType) +
+                          scale_x_date(date_breaks = "2 years", labels = scales::date_format(format = "%Y")) +
+                          scale_y_continuous(breaks = waiver()) +  
+                          labs(title = "Rolling correlation total cases per week with temperature sma", 
+                               x =  "", 
+                               y = "") +
+                          theme(legend.direction = 'horizontal', legend.position = 'bottom')
+```
+
+# Problem description
+The dataset is a time series about laboratory confirmed dengue cases in two cities: San Juan and Iquitos. Test data for each city spans for five and three years respectively. The test set is a pure future hold-out, meaning the test data are sequential to and non-overlapping with any of the training data.  Both the training and test data contain missing values. Station meteorological readings are in Celsius  while the reanalysis readings are in Celsius.\
+\
+The goal of the competition is to predict the total dengue cases for each city per week in the test set. The evaluation metric is mean absolute error. My mission is to add predictive power to the data by investigating moving averages and rolling correlation between the total dengue cases and metrological variables included in the data set. I used this competition to gain experience with time series decomposition, anomaly detection (outliers) and the algorithm open sourced by Facebook for time series forecasting: Prophet. \
+
+\newpage
+
+# Methods
+
+I performed the following tasks to design and test a forecasting model that predicts dengue cases with Facebook’s forecasting model Prophet.
+
+* Study background and formulate design considerations for the forecast model.
+* Perform data wrangling: load datasets, convert Kelvin to Celsius.
+* Exploratory data analysis.
+* Impute missing values with Kalman Smoothing.
+* Feature engineering, design and train forecast model.
+* Re-evaluate analysis and design.
+
+
+# Results background study
+
+## Epidemiology perspective:
+
+* Dengue is endemic, it occurs every year. The forecast model will benefit from research of seasonality and anomaly’s.
+* Both humans and mosquitos can only transmit the virus after an incubation period. Which suggests that we need to investigate lagging values within the data to find the best correlations with the current number of dengue cases. The total dengue cases per week only contains confirmed cases. Performing lab tests and gathering the results also takes time.
+
+
+## Ecology and geological perspectives:
+
+* *Aedes aegypti*, the principal mosquito of dengue viruses, is an insect closely associated with humans and our dwellings. The mosquito lays her eggs on the sides of containers with water. Eggs hatch into larvae after a rain or flooding. This indicates that total precipitation during a period could be predictive.
+* It is very difficult to control or eliminate these mosquitoes because they have adaptations to the environment that make them highly resilient. Seasonality is most likely to repeat it selve in the nearby future.
+* The data spans two different geological locations. One forecast model per city allows for specific business rules which probably will yield the best overall results.
+
+
+## Historical facts about dengue outbreaks
+
+The test data about San Juan starts at 29-04-2008 and ends at 25-06-2013. An online blog, see references, described two outbreaks in Puerto Rice during this timeframe:
+
+* Epidemic declared 26 February 2010 that lasted until 30 December 2010, and claimed 28 lives.
+* Epidemic declared 08 October 2012 that lasted until 17 July 2014 (almost 2 years!).
+
+\newpage
+
+# The two different geological locations: San Juan and Iquitos
+
+## Anomalies detected with R package Anomalize
+
+Data points that are outliers, or an exceptional event, are considered anomalies. The Anomalize package is designed for time series and contains two methods for automated anomaly detection: Inner Quartile Range (IQR) and Generalized Extreme Studentized Deviate test (GESD). Anomaly detection can be easily done on small datasets by plotting the data with boxplots, however, it becomes increasingly more difficult on large time series. Hence, I decided to give Anomalize a try and used GESD to spot anomalies. In GESD anomalies are progressively evaluated removing the worst offenders and recalculating the test statistics and critical values.\
+\
+It first decomposes , divides, the subject in the time series, total dengue cases per week, into four columns that are observed, season, trend, and remainder. The anomalies are detected in the remainder, which is observed minus its season and trend components. The default method ‘STL’ for decomposition is used and a 12 months frequency and trend to calculate data for the plot below.\ 
+\
+```{r figure_anomalies, echo=FALSE, out.height="80%", out.width="80%",fig.align="center"}
+print(figure_anomalies)
+```
+
+## How does seasonality differ between the two cities?
+
+Dengue cases in both cities show seasonal patterns. However, the start and the end of the dengue seasons differ between the cities. The seasonal pattern below is based on data calculated by the Anomalize package with decomposition method ‘STL’.
+
+```{r figure_season sj, echo=FALSE, out.height="30%", out.width="90%", fig.align="center"}
+figure_season.sj <- ggarrange(figure_season_sj, pMax.sj, pMin.sj, ncol = 3, nrow = 1)
+print(figure_season.sj)
+```
+```{r figure_season iq, echo=FALSE, out.height="30%", out.width="90%", fig.align="center"}
+figure_season.iq <- ggarrange(figure_season_iq, pMax.iq, pMin.iq, ncol = 3, nrow = 1) %>% 
+                    annotate_figure(top = NULL, 
+                                  bottom = text_grob("Iquitos has seen zero cases in all months, San Juan only during spring.", 
+                                                     color = "#7a7a7a", hjust = 0.5, face = "italic", size = 9), 
+                                  fig.lab = NULL, fig.lab.face = "plain")
+print(figure_season.iq)
+```
+
+\newpage
+
+# San Juan and the quest for correlation
+
+Initial trial runs resulted in a more than triple mean absolute error for the forecast of San Juan compared to Iquitos. Hence, I decided to prioritize on San Juan for explorative data analysis. The data violates two Pearson correlation assumptions: it has numerous outliers and shows non-normal distributions. Therefore I assumed that correlations based on Spearman’s rank-order correlation are a better fit with the data.
+
+## Correlation of total dengue cases with features
+
+The figure below illustrates the distributions and correlations between the selected features and the total dengue cases per week.\
+\
+```{r figure_comp, echo=FALSE, out.height="80%", out.width="80%",fig.align="center"}
+print(figure_comp)
+```
+
+
+## Improving correlation by adding lagging features
+
+Not Surprisingly, the correlation of total dengue cases with climate features over the same week, in which the dengue cases were reported, is disappointing. \
+I wrote a function that adds lagging versions of the variables by iteration through look back periods starting from 1 to 25 weeks. Next I added the an interaction variable, temperature multiplied by humidity, because both variables contribute to the growth of the mosquito population. The resulting interaction variable has the best correlation with dengue cases, but can we trust this relationship to be predictive in the future? Are correlations static?\
+\
+First, let’s have a look at the illustration below with distributions and correlations of the moving averages added to the data. Please note that a rolling sum was used for precipitation amount in millimeters and moving averages for all others.\
+\
+```{r figure_comp_sma, echo=FALSE, out.height="80%", out.width="80%", fig.align="center"}
+print(figure_comp_sma)
+```
+
+\newpage
+
+By determining the best look back period for the moving averages the correlations show a significant improvement. The interaction variable has the highest correlation.  Correlations in timeseries are not static. Which is illustrated by the figure shown below.\
+
+```{r figure_cor_roll, echo=FALSE, out.height="80%", out.width="80%", fig.align="center"}
+print(figure_cor_roll)
+```
+
+The rolling correlation, 52 weeks look back period,  of the temperature moving averages is mostly above 0.75 but potentially drops to 0.25 or even 	as low as 0.016. In 2003 it reverses from a positive correlation to a negative correlation with the total dengue cases.
+
+\newpage
+
+# San Juan, what patterns are revealed by scatter plots? 
+
+The scatter plots reveal distinct patterns. Unfortunately these patterns coincide with seasonal patterns: outbreaks always reach their highest level in the last quarter of the year and so do the values of the variables.  The distinctive characteristics of the patterns is therefore limited. I used a rolling sum for precipitation, but the scatter plot indicates that a plain lagging value might be a better fit.
+
+```{r figure_interaction_scatter, echo=FALSE}
+print(figure_scatter)
+```
+
+\newpage
+
+# Machine learning model
+
+## About Prophet
+
+Prophet is forecasting tool open sourced by Facebook available in Python and R. It includes an algorithm and ready to go plots for visual analysis. I choose this package in R out of curiosity and because it is said to be optimized for time series with an reasonable number of missing observations or large outliers. At its core, the Prophet procedure is an additive regression model with the following main components:
+
+* Piecewise linear or logistic growth curve trend. Prophet automatically detects changes in trends by selecting changepoints from the data.
+* Yearly seasonal component modeled using Fourier series and weekly seasonal component using dummy variables.
+* A user-provided list of important holidays.
+
+
+## Settings
+
+Initial trial runs showed that Prophet predicts large values below zero when using a linear growth model. I did not succeed in creating a stable model with linear models and decided to go for a logistic model which is a better fit for count data (counts of dengue cases per week). I also replaced outlier values - 1.5 * IQR(total dengue cases) – with missing values. This triggers Prophet to predict these values which resulted in a predicted trend without outbreaks.\  
+I used the following settings for both San Juan and Iquitos:
+
+*	Changepoint prior scale. If trend changes are being overfit (to much flexibility) or underfit (not enough flexibility) you can adjust the strength of the sparse prior using this setting. By default this parameter is set to 0.05. Increasing it will make the trend more flexible. I changed this setting to 0.001. With outliers removed it provides a stable seasonal pattern.
+*	Yearly seasonality. The default Fourier order for seasonality is 10. It determines how quickly the seasonality can change. I did some trial runs and concluded that 5 provides the best result.
+*	By default Prophet fits additive seasonality’s (mode), meaning the effect of the seasonality is added to the trend to get the forecast. I assumed that in the dengue time series, the seasonality is a constant additive factor, rather than that it grows with the trend. I concluded that multiplicative only applies to the short outbreak periods.
+*	Oddly enough Prophet continues to predict below zero values using a logistic growth model with a floor of zero. The final model uses a cap equal to 1.5 * IQR(total dengue cases) and a floor of 20 for San Juan and 4 for Iquitos.
+
+## Feature selection
+
+Extra regressors are put in the linear component of the model, so the underlying model is that the time series depends on the extra regressor as either an additive or multiplicative factor. The extra regressor must be known for both the history and for future test dates. It thus must either be something that has known values (such as temperature), or something that has separately been forecasted.
+
+### San Juan
+
+The San Juan model uses the following variables as predictors: 
+
+* Temperature: 25 weeks moving average.  Because it has the highest correlation with dengue cases.
+* Humidity: 18 weeks moving average. It has an higher correlation with dengue cases but lower correlation with temperature then dew point. 
+* Precipitation: 52 weeks rolling sum. Because it showed no correlation with humidity and mosquitos just love human made containers with stagnant water. It is also the only variable with a negative correlation with dengue cases.
+
+### Iquitos
+
+The Iquitos model uses the following variables as predictors:
+
+* Air temperature: 8 weeks moving average.
+* Humidity: 3 weeks moving average
+* Precipitation: 6 weeks rolling sum;
+
+## San Juan: Classify years with outbreak using decision tree
+
+The Prophet model described above will do a decent job for predicting seasonal patterns in dengue cases. However it does not predict outbreaks.  I added a simple decision tree, based on a random forest algorithm, that classifies per year whether or not an outbreak will take place.\
+\
+To be accurate we should be modeling per month or even week. However, the aim is just to see if such approach would be feasible. Hence, I created a simple set of training data and a model which uses following ingredients:
+
+* The train data per year has variable called “outbreak” that classifies each year as one with or without an outbreak (“yes”  or “ no”). A year is considered to have an outbreak if the total dengue cases per semester reached 125 or more in the second semester. This variable is the dependent variable which the algorithm must predict.
+* Independent variables per year: average temperature and sum of precipitation in the third quarter of each year (outbreaks mostly start in the fourth quarter).
+
+The random forest classifier was trained for San Juan with default settings on data spanning from 1991 until 2005. It predicted correctly 2006 as a year without outbreak and 2007 as a year with outbreak. The “unseen” years in the test data for the competition where classified as follows:
+
+* 2008 No, which is plausible.
+* 2009 Yes, which is incorrect based on the historical facts. 
+* 2010 Yes, which is plausible.
+* 2011, No , which is plausible.
+* 2012, Yes, which is plausible.
+
+A shortcoming of this approach is that it predicts on a yearly basis. I therefore assumed that outbreaks always start in August and end in October. During this time frame the predicted dengue cases are multiplied by an arbitrary 3 if a year is classified as a year with outbreak.
+
+# Model evaluation
+
+The model performs very well on the training data as shown below. It is however not yet competitive on the leaderboard. The submitted data results in a mean absolute error of 24.3846, which defeats the benchmark as published by DrivenData, but is much higher than the results during model validation. I assume that this is caused by not being accurate enough in predicting the outbreak periods.\
+\
+The figures below show the results based on training data. Outbreak prediction was not added to the Iquitos model.
+
+
+```{r f_figure_validate_sj, echo=FALSE}
+forecast.sj <- f_prophet_model(full.df.sj, "2003-04-20", horizon = 5)$forecast
+forecast.sj$yhat <- if_else(forecast.sj$outbreak == "Yes",forecast.sj$yhat * 3,forecast.sj$yhat)
+p_sj <- f_figure_validate(f_figure_forecast(forecast.sj))
+forecast.iq <- f_prophet_model(full.df.iq, "2005-06-20", horizon = 4)$forecast
+p_iq <- f_figure_validate(f_figure_forecast(forecast.iq))
+ggarrange(p_sj, p_iq, ncol = 1, nrow = 2, common.legend = TRUE)
+```
+
+```{r submission forecast San Juan, echo=FALSE, warning=FALSE, message=FALSE}
+cutOffDate.sj <- full.df.sj %>% filter(!is.na(total_cases)) %>% slice(which.max(week_start_date)) %>% pull(week_start_date)
+forecast.sj <- f_prophet_model(full.df.sj, cutOffDate.sj, horizon = 10)$forecast %>%
+              mutate(yhat = if_else(outbreak == "Yes",yhat * 3,yhat)) %>%
+               mutate(month = month(ds)) %>% 
+               inner_join(by_month.sj, by = "month") %>% 
+               mutate(yhat = if_else(yhat < min_total_cases,min_total_cases,round(yhat))) %>% 
+               select(-c(names(by_month.sj)))
+```
+
+```{r submission forecast Iquitos, echo=FALSE, warning=FALSE, message=FALSE}
+cutOffDate.iq <- full.df.iq %>% filter(!is.na(total_cases)) %>% slice(which.max(week_start_date)) %>% pull(week_start_date)
+forecast.iq <- f_prophet_model(full.df.iq, cutOffDate.iq, horizon = 10)$forecast %>% 
+               mutate(month = month(ds)) %>% 
+               inner_join(by_month.iq, by = "month") %>% 
+               mutate(yhat = if_else(yhat < min_total_cases,min_total_cases,round(yhat))) %>% 
+               select(-c(names(by_month.iq)))
+```
+
+```{r submission create file, echo=FALSE, warning=FALSE, message=FALSE}
+########################################################################################################################################
+# Create submission file for upload to leaderboard on DrivenData website                                                               #
+########################################################################################################################################
+submission <-  rbind(select(forecast.sj, c("city","ds","yhat")) , select(forecast.iq, c("city","ds","yhat"))) %>% 
+               rename(week_start_date = ds, total_cases = yhat) %>%
+               mutate(year = lubridate::year(week_start_date), weekofyear = lubridate::isoweek(week_start_date)) %>%
+               select(-week_start_date)
+
+submission_format <- read_csv("submission_format.csv")
+submission_format$total_cases <- NULL
+submission_format <- inner_join(submission_format, submission, by = c("city","year","weekofyear"))
+
+write.csv(file = "submission.csv", x = submission_format, row.names = FALSE, quote = TRUE)
+```
+
+\newpage
+
+# Discussion
+
+* Prophets predicts negative values even when history does not contain these values.  Issue persist on smaller scale in logistic models. Solved by replacing negative values with minimum seen values. I did not find the root cause.
+* Prophets automated detection of trend change points can be a potential source of overfitting. Manually setting trend change points in Prophet allows for a human in the loop machine learning system. This is a potential solution for the bias the algorithms develops towards a specific trend direction due to large outliers in observed dengue totals.
+* The total dengue cases per week are non-negative integers which arise from counting. Other algorithms, that focus on count data, might be a better fit.
+* I did not analyze the probabilities that are the basis for the classification model.  Accuracy might improve with a higher or lower probability needed to classify a yeas as a year with an outbreak. 
+* I was able to improve on forecasting the outbreaks by adding a multiplier to the time series of San Juan: ‘0’ for timeframes without an outbreak, ‘0.5’ during minor outbreaks (e.g. 1991) , ’1.5’ during medium outbreaks (e.g. 1998) and ‘2’ during huge outbreaks (e.g. 1994). The timeframes for outbreaks in the unseen test data can be derived from the following blog: https://www.puertoricodaytrips.com/dengue-puerto-rico/. This approach resulted in rank 154 of 5456 on the leaderboard. I dropped the approach from this study because it is cheating. It does however confirm that predicting outbreak periods with a tree based algorithm could be a plausible and winning solution.
+
+\newpage
+
+# Conclusion
+
+I learned how to add predictive value to time series by calculating moving averages on  interval data (e.g. temperature) and rolling totals on precipitation. Correlation in time series is not static as shown with an example. Investigating rolling correlations when analyzing time series can prevent the analyst from presenting wrong assumptions.\
+\
+The model defeats the benchmark by 5,55% but is not yet competitive. This is probably due to the fact that it lacks the ability to predict the periods in which the outbreaks will happen and the magnitude of these outbreaks. This study does show that it might be feasible to design a model that predict dengue cases by distributing objectives over different machine learning algorithms.  Examples of objectives are to predict the seasonal trend and the magnitude of an outbreak.\ 
+\
+The competition was to predict dengue cases over a future period of multiple years given meteorological values per week. In real live we do not have these future values other than short term weather forecasts.  Short term predictions using autocorrelation based algorithms will yield much better accuracy. 
+
+\newpage
+
+# References
+
+## Resources consulted during background study
+
+I read, and used, content on the following websites during the background study about dengue: 
+
+* https://www.who.int/denguecontrol/mosquito/en/
+* https://www.cdc.gov/dengue/epidemiology/index.html
+* https://gisgeography.com/ndvi-normalized-difference-vegetation-index/
+
+## Resources consulted for technical design 
+
+I recommend reading the following online posts which I used as a basis for the technical solution:
+
+* https://facebook.github.io/prophet/docs/multiplicative_seasonality.html
+* https://www.datacamp.com/community/tutorials/detect-anomalies-anomalize-r   
+
+## R packages used in software code
+
+The following R open source packages are used in the software code which is described, or used, in this document:
+
+* **‘tidyverse’**, a collection of R packages for data science. Includes  ‘dplyr’  for data wrangling tasks like data manipulation and combining multiple files into a train and a test (unseen) dataset. Ships with ‘ggplot2’ for data visualization.
+* **‘lubridate’** provides date functions, e.g. extract month and year from a date.
+* **‘imputeTS’** great at imputing missing values in structured time series with, among others, Kalman Smoothing.
+* **‘TTR’** for calculating moving averages.
+* **‘weathermetrics’**  includes a function to convert from Kelvin to Celsius. 
+* **‘tibbletime’**  on its own has useful functions for manipulating time-based tibbles. Working with time-based tibbles is a prerequisite for the ‘anomalize’  package.
+* **‘anomalize’** enables a tidy workflow for detecting anomalies (outliers) in structured time series. I used it for anomaly detection and time series decomposition.
+* **‘prophet’** is a forecasting tool open sourced by Facebook. It is the core of the forecasting model described in this document.
+* **‘GGally’** is used to visualize pairwise comparison of multivariate data.
+* **‘ggpubr’** arranges multiple data visualizations into one figure.
+* **‘ggthemes’**, provides 'ggplot2' themes and scales that replicate the look of data visualizations. 
