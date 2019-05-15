@@ -4,3 +4,5 @@ Predicting disease spread, a DrivenData competition. I'am currently participatin
 * **dengai-code.R** file with the R code.
 * **DengAI.Rmd** markdown that creates the pdf file.
 
+Information about the competion: https://www.drivendata.org/competitions/44/dengai-predicting-disease-spread/
+
