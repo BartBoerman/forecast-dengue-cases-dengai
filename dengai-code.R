@@ -449,22 +449,21 @@ figure_validate <- ggarrange(p_sj, p_iq, ncol = 1, nrow = 2, common.legend = TRU
 ####################################################################################
 cutOffDate.sj <- full.df.sj %>% filter(!is.na(total_cases)) %>% slice(which.max(week_start_date)) %>% pull(week_start_date)
 forecast.sj <- f_prophet_model(full.df.sj, cutOffDate.sj, horizon = 10)$forecast %>%
-                              mutate(yhat = if_else(outbreak == "Yes",yhat * 3,yhat)) %>%
+                              mutate(yhat = if_else(outbreak == "Yes", yhat * 3, yhat)) %>%
                               mutate(month = month(ds)) %>% 
                               inner_join(by_month.sj, by = "month") %>% 
-                              mutate(yhat = if_else(yhat < min_total_cases,min_total_cases,round(yhat))) %>% 
+                              mutate(yhat = if_else(yhat < min_total_cases,min_total_cases, as.integer(round(yhat)))) %>% 
                               select(-c(names(by_month.sj)))
 cutOffDate.iq <- full.df.iq %>% filter(!is.na(total_cases)) %>% slice(which.max(week_start_date)) %>% pull(week_start_date)
 forecast.iq <- f_prophet_model(full.df.iq, cutOffDate.iq, horizon = 10)$forecast %>% 
                               mutate(month = month(ds)) %>% 
                               inner_join(by_month.iq, by = "month") %>% 
-                              mutate(yhat = if_else(yhat < min_total_cases,min_total_cases,round(yhat))) %>% 
+                              mutate(yhat = if_else(yhat < min_total_cases,min_total_cases, as.integer(round(yhat)))) %>% 
                               select(-c(names(by_month.iq)))
 submission <-  rbind(select(forecast.sj, c("city","ds","yhat")) , select(forecast.iq, c("city","ds","yhat"))) %>% 
                             rename(week_start_date = ds, total_cases = yhat) %>%
                             mutate(year = lubridate::year(week_start_date), weekofyear = lubridate::isoweek(week_start_date)) %>%
                             select(-week_start_date)
-
 submission_format <- read_csv("submission_format.csv")
 submission_format$total_cases <- NULL
 submission_format <- inner_join(submission_format, submission, by = c("city","year","weekofyear"))
