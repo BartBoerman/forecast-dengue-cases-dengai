@@ -4,9 +4,9 @@ This repository contains my eﬀort to be competitive in predicting in the dengu
 
 # This repository includes the following documents:
 
-* [The analysis: (DengAI.pdf)] (/DengAI.pdf)
-* [The R scripts with the exploratory data analysis and the model (dengai-code.R)] (/dengai-code.R))
-* [The markdown file which created the pdf (DengAI.Rmd)] (/DengAI.Rmd)
+* [The analysis: (DengAI.pdf)](/DengAI.pdf)
+* [The R scripts with the exploratory data analysis and the model (dengai-code.R)](/dengai-code.R))
+* [The markdown file which created the pdf (DengAI.Rmd)](/DengAI.Rmd)
 
 # More information about the competition
 
